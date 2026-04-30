@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Column, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import DateTime, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
 
@@ -8,34 +9,47 @@ from database import Base
 class Tender(Base):
     __tablename__ = "tenders"
 
-    id = Column(Integer, primary_key=True, index=True)
-    company = Column(String(255), nullable=False)
-    title = Column(String(500), nullable=False)
-    tender_number = Column(String(100), nullable=False, unique=True)
-    sector = Column(String(50), nullable=False)
-    location = Column(String(255), nullable=False)
-    closing_date = Column(Date, nullable=False)
-    source_portal = Column(String(255), nullable=False)
-    source_url = Column(String(500), nullable=False)
-    matched_keywords = Column(Text, nullable=False, default="")
-    relevance_score = Column(Float, nullable=False, default=0)
-    status = Column(String(50), nullable=False, default="Review")
-    ai_summary = Column(Text, nullable=False, default="")
-    bid_recommendation = Column(String(100), nullable=False, default="Review")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company: Mapped[str] = mapped_column(String(200), index=True)
+    title: Mapped[str] = mapped_column(String(500), index=True)
+    tender_number: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    sector: Mapped[str] = mapped_column(String(50), index=True)
+    location: Mapped[str] = mapped_column(String(200), index=True)
+    closing_date: Mapped[str] = mapped_column(String(20), index=True)
+    source_portal: Mapped[str] = mapped_column(String(200), index=True)
+    source_url: Mapped[str] = mapped_column(String(500))
+    matched_keywords: Mapped[str] = mapped_column(Text, default="")
+    relevance_score: Mapped[float] = mapped_column(Float, default=0)
+    status: Mapped[str] = mapped_column(String(50), index=True)
+    ai_summary: Mapped[str] = mapped_column(Text)
+    bid_recommendation: Mapped[str] = mapped_column(String(50), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 
 class Keyword(Base):
     __tablename__ = "keywords"
 
-    id = Column(Integer, primary_key=True, index=True)
-    value = Column(String(255), nullable=False, unique=True)
-    weight = Column(Float, nullable=False, default=1.0)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    term: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    weight: Mapped[float] = mapped_column(Float, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 
 class Source(Base):
     __tablename__ = "sources"
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False, unique=True)
-    url = Column(String(500), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    url: Mapped[str] = mapped_column(String(500))
+    source_type: Mapped[str] = mapped_column(String(50), default="Public")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
