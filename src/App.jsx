@@ -6,7 +6,9 @@ const API_BASE = 'http://localhost:8000';
 const watchlist = [
   'hot oil circulation', 'hot oiling', 'HOC', 'chemical injection', 'chemical dosing',
   'corrosion inhibitor', 'scale inhibitor', 'wax removal', 'paraffin', 'flow assurance',
-  'dosing pump', 'Mehsana', 'Cambay', 'Ahmedabad', 'Gujarat',
+  'dosing pump', 'charter hire of rig', 'coil tubing unit', 'nitrogen unit', 'pumper',
+  'acid pumper', 'cementing unit', 'charter hire 30 ton rig', 'charter hire 50 ton rig',
+  'O&M rig', 'Mehsana', 'Cambay', 'Ahmedabad', 'Gujarat',
 ];
 
 const statusClasses = {
