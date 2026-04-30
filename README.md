@@ -1,128 +1,166 @@
 # Oil & Gas Tender Agent
 
-## 1) What this app does
-Oil & Gas Tender Agent is a full-stack monitoring dashboard for **AONE Exploration Pvt Ltd**.
+Oil & Gas Tender Agent monitors public and private oil and gas tender sources for AONE Exploration Pvt Ltd. The app helps identify tenders related to hot oil circulation, hot oiling, chemical injection, chemical dosing, inhibitors, wax removal, paraffin control, flow assurance, dosing pumps, and Gujarat-focused opportunities.
 
-It helps teams:
-- scan mock/public tender feeds,
-- score relevance based on oil & gas service keywords,
-- prioritize opportunities (`High Priority`, `Review`, `Low Priority`),
-- review tenders in a dashboard,
-- send SMTP email alerts for high-priority tenders and daily summaries.
+The MVP includes:
 
----
+- React/Vite/Tailwind dashboard
+- FastAPI backend
+- SQLite database
+- SQLAlchemy models
+- Pydantic schemas
+- Safe public-page tender scanner
+- Keyword-based relevance scoring
+- SMTP email alert support
 
-## 2) How to install frontend
-From repository root:
+## Frontend Install
 
-```bash
-npm install
+From the project root:
+
+```powershell
+npm.cmd install
 ```
 
-Frontend stack:
+The frontend uses:
+
 - React
 - Vite
 - Tailwind CSS
 - lucide-react
 
----
+## Backend Install
 
-## 3) How to install backend
-From repository root:
+Install Python dependencies from the project root:
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+```powershell
+python -m pip install -r backend\requirements.txt
 ```
 
-Backend stack:
-- FastAPI
-- SQLite
-- SQLAlchemy
-- Pydantic
+If `python` is not available on PATH, use your local Python executable path.
 
----
+Create backend environment settings:
 
-## 4) How to run the app
-### Start backend (port 8000)
-```bash
-source .venv/bin/activate
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```powershell
+Copy-Item backend\.env.example backend\.env
 ```
 
-### Start frontend (port 5173 by default)
-In another terminal:
-```bash
-npm run dev
+Edit `backend\.env` with SMTP settings only when email alerts should be enabled. Never commit real passwords.
+
+## Run The App
+
+Start the backend:
+
+```powershell
+cd backend
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-### App flow
-- Frontend calls `GET http://localhost:8000/tenders`
-- Clicking **Run Scan** triggers `POST http://localhost:8000/scan`, then refreshes tenders list.
+Backend API:
 
----
+- http://127.0.0.1:8000
+- http://127.0.0.1:8000/docs
 
-## 5) How to add tender sources
-You can add source metadata through API:
+Start the frontend in another terminal:
 
-```bash
-curl -X POST http://localhost:8000/sources \
-  -H "Content-Type: application/json" \
-  -d '{"name":"New Public Source","url":"https://example.com/public-tenders"}'
+```powershell
+npm.cmd run dev -- --host 127.0.0.1 --port 5173
 ```
 
-To add actual scraper logic, edit:
-- `backend/scraper.py`
+Frontend dashboard:
 
-Add a new source function returning `list[dict]` with tender fields, then include it in `fetch_mock_tenders()`.
+- http://127.0.0.1:5173
 
----
+Use the dashboard `Run Scan` button to call `POST /scan`, update SQLite tender records, and refresh the tender list.
 
-## 6) How to add keywords
-Add keywords via API:
+## Add Tender Sources
 
-```bash
-curl -X POST http://localhost:8000/keywords \
-  -H "Content-Type: application/json" \
-  -d '{"value":"well intervention","weight":20}'
+Tender sources are stored through the backend API:
+
+- `GET /sources`
+- `POST /sources`
+
+Example:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/sources `
+  -ContentType 'application/json' `
+  -Body '{"name":"New Public Portal","url":"https://example.com/tenders","source_type":"Public","is_active":true}'
 ```
 
-List current keywords:
+Scraper functions live in `backend/scraper.py`. Existing safe scraper functions include:
 
-```bash
-curl http://localhost:8000/keywords
+- `scrape_cppp_tenders`
+- `scrape_ongc_tenders`
+- `scrape_oil_india_tenders`
+- `scrape_gail_tenders`
+- `scrape_iocl_tenders`
+- `scrape_bpcl_tenders`
+- `scrape_hpcl_tenders`
+- `scrape_private_vendor_portals`
+
+Each scraper returns a list of tender dictionaries. Scrapers should only read publicly available pages and must return an empty list if access fails or the page appears restricted.
+
+## Add Keywords
+
+Keywords are stored through the backend API:
+
+- `GET /keywords`
+- `POST /keywords`
+
+Example:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/keywords `
+  -ContentType 'application/json' `
+  -Body '{"term":"well stimulation","weight":30}'
 ```
 
----
+Default keyword weights are defined in `backend/scoring.py`. On backend startup, built-in keyword weights are refreshed in SQLite. Custom keywords added through the API remain available.
 
-## 7) How scoring works
-Scoring is rule-based (`backend/scoring.py`) and applies:
-- **positive signals** (e.g., hot oil circulation, chemical injection, ONGC, GAIL),
-- **negative signals** (e.g., civil work, housekeeping, canteen).
+## Scoring
 
-Final relevance score is bounded to `0..100`.
+The scoring engine matches tender text against weighted keywords in `backend/scoring.py`.
 
-Status mapping:
-- `score >= 80` → **High Priority**
-- `score 50..79` → **Review**
-- `score < 50` → **Low Priority**
+Positive examples:
 
-Email alerts:
-- Immediate alert when `relevance_score >= 80`
-- Daily summary email (once per day)
+- `hot oil circulation`: +60
+- `hot oiling`: +60
+- `chemical injection`: +50
+- `chemical dosing`: +45
+- `flow assurance`: +35
+- `Mehsana`: +25
+- `ONGC`: +25
 
-SMTP configuration is loaded from `.env` (see `.env.example`).
+Negative examples:
 
----
+- `civil work`: -40
+- `housekeeping`: -40
+- `furniture`: -30
+- `painting`: -25
+- `canteen`: -40
+- `security service`: -40
 
-## 8) Legal note
-This app must be used only for lawful, authorized access to tender information.
+Final scores are capped between `0` and `100`.
 
-**It must not:**
-- bypass CAPTCHA,
-- bypass login/authentication,
-- scrape restricted/private pages,
-- violate terms of service of tender portals.
+Status logic:
 
-Only use publicly available pages and approved data access methods.
+- `score >= 80`: High Priority
+- `score 50 to 79`: Review
+- `score below 50`: Low Priority
+
+Immediate email alerts are sent after scans when `relevance_score >= ALERT_SCORE_THRESHOLD`, usually `80`, and SMTP alerts are enabled in `backend\.env`.
+
+## Legal And Access Note
+
+This app must not bypass CAPTCHA, login, paywalls, session controls, robots restrictions, or restricted tender portals.
+
+Scrapers must:
+
+- Use only publicly available pages
+- Skip CAPTCHA pages
+- Skip login-gated pages
+- Skip restricted or unauthorized pages
+- Log errors and continue
+- Avoid any attempt to defeat access controls
+
+For restricted tender portals, use official APIs, authorized vendor access, manual upload, or approved integrations instead of scraping.
