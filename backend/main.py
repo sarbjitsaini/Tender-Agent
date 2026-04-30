@@ -1,161 +1,186 @@
-from fastapi import Depends, FastAPI, HTTPException
+import json
+import logging
+from collections.abc import Sequence
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 import models
-import schemas
-from database import Base, engine, get_db
-from scoring import priority_from_score, score_tender
-from scraper import fetch_mock_tenders
-from alerts import send_daily_summary_if_due, send_high_priority_alert
+from database import Base, SessionLocal, engine, get_db
+from email_alerts import send_high_relevance_alerts, start_daily_summary_scheduler
+from schemas import KeywordCreate, KeywordOut, ScanResult, SourceCreate, SourceOut, TenderOut
+from scoring import DEFAULT_KEYWORD_WEIGHTS, weights_from_keywords
+from scraper import fetch_live_tenders
 
-app = FastAPI(title="Oil & Gas Tender Agent API")
+logging.basicConfig(level=logging.INFO)
 
-Base.metadata.create_all(bind=engine)
+app = FastAPI(title="Oil & Gas Tender Agent API", version="0.1.0")
 
-DEFAULT_KEYWORDS = [
-    {"value": "hot oil circulation", "weight": 4.0},
-    {"value": "hot oiling", "weight": 4.0},
-    {"value": "HOC", "weight": 2.0},
-    {"value": "chemical injection", "weight": 3.0},
-    {"value": "chemical dosing", "weight": 3.0},
-    {"value": "corrosion inhibitor", "weight": 2.5},
-    {"value": "scale inhibitor", "weight": 2.0},
-    {"value": "wax removal", "weight": 2.5},
-    {"value": "paraffin", "weight": 2.5},
-    {"value": "flow assurance", "weight": 2.0},
-    {"value": "dosing pump", "weight": 2.0},
-    {"value": "Mehsana", "weight": 2.0},
-    {"value": "Cambay", "weight": 2.0},
-    {"value": "Ahmedabad", "weight": 1.5},
-    {"value": "Gujarat", "weight": 1.0},
-]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def ensure_defaults(db: Session):
-    if db.query(models.Keyword).count() == 0:
-        for item in DEFAULT_KEYWORDS:
-            db.add(models.Keyword(value=item["value"], weight=item["weight"]))
-    if db.query(models.Source).count() == 0:
-        db.add(models.Source(name="ONGC eProc Portal", url="https://example.com/ongc"))
-        db.add(models.Source(name="Vendor Procurement Hub", url="https://example.com/cairn"))
-    db.commit()
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        seed_defaults(db)
+    start_daily_summary_scheduler(SessionLocal)
 
 
-@app.get("/tenders", response_model=list[schemas.TenderResponse])
+@app.get("/")
+def health_check():
+    return {"status": "ok", "service": "oil-gas-tender-agent"}
+
+
+@app.get("/tenders", response_model=list[TenderOut])
 def get_tenders(db: Session = Depends(get_db)):
-    ensure_defaults(db)
-    tenders = db.query(models.Tender).order_by(models.Tender.created_at.desc()).all()
-    return [serialize_tender(t) for t in tenders]
+    tenders = db.scalars(select(models.Tender).order_by(models.Tender.relevance_score.desc())).all()
+    return [serialize_tender(tender) for tender in tenders]
 
 
-@app.get("/tenders/{tender_id}", response_model=schemas.TenderResponse)
+@app.get("/tenders/{tender_id}", response_model=TenderOut)
 def get_tender(tender_id: int, db: Session = Depends(get_db)):
-    tender = db.query(models.Tender).filter(models.Tender.id == tender_id).first()
-    if not tender:
-        raise HTTPException(status_code=404, detail="Tender not found")
+    tender = db.get(models.Tender, tender_id)
+    if tender is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tender not found")
     return serialize_tender(tender)
 
 
-@app.post("/scan", response_model=list[schemas.TenderResponse])
+@app.post("/scan", response_model=ScanResult)
 def scan_tenders(db: Session = Depends(get_db)):
-    ensure_defaults(db)
-    ingested = []
+    keyword_weights = weights_from_keywords(db.scalars(select(models.Keyword)).all())
+    scraped_tenders = fetch_live_tenders(keyword_weights)
+    db.execute(delete(models.Tender))
+    saved_tenders = []
 
-    for item in fetch_mock_tenders():
-        exists = db.query(models.Tender).filter(models.Tender.tender_number == item["tender_number"]).first()
-        if exists:
-            ingested.append(serialize_tender(exists))
-            continue
+    for tender_data in scraped_tenders:
+        payload = tender_payload_for_db(tender_data)
+        saved_tender = models.Tender(**payload)
+        db.add(saved_tender)
+        saved_tenders.append(saved_tender)
 
-        matched, relevance = score_tender(item["company"], item["title"], item["location"])
-        status, recommendation = priority_from_score(relevance)
-
-        tender = models.Tender(
-            **item,
-            matched_keywords=",".join(matched),
-            relevance_score=relevance,
-            status=status,
-            bid_recommendation=recommendation,
-        )
-        db.add(tender)
-        db.commit()
+    db.commit()
+    for tender in saved_tenders:
         db.refresh(tender)
-        serialized = serialize_tender(tender)
-        ingested.append(serialized)
 
-        if serialized["relevance_score"] >= 80:
-            send_high_priority_alert(serialized)
+    serialized_tenders = [serialize_tender(tender) for tender in saved_tenders]
+    send_high_relevance_alerts(serialized_tenders)
 
-    send_daily_summary_if_due(ingested)
-    return ingested
+    return {
+        "scanned": len(scraped_tenders),
+        "created": len(saved_tenders),
+        "updated": 0,
+        "tenders": serialized_tenders,
+    }
 
 
-@app.get("/keywords", response_model=list[schemas.KeywordResponse])
+@app.get("/keywords", response_model=list[KeywordOut])
 def get_keywords(db: Session = Depends(get_db)):
-    ensure_defaults(db)
-    return db.query(models.Keyword).order_by(models.Keyword.id.asc()).all()
+    return db.scalars(select(models.Keyword).order_by(models.Keyword.weight.desc(), models.Keyword.term)).all()
 
 
-@app.post("/keywords", response_model=schemas.KeywordResponse)
-def add_keyword(payload: schemas.KeywordCreate, db: Session = Depends(get_db)):
-    exists = db.query(models.Keyword).filter(models.Keyword.value.ilike(payload.value)).first()
-    if exists:
-        raise HTTPException(status_code=400, detail="Keyword already exists")
+@app.post("/keywords", response_model=KeywordOut, status_code=status.HTTP_201_CREATED)
+def create_keyword(keyword: KeywordCreate, db: Session = Depends(get_db)):
+    existing = db.scalar(select(models.Keyword).where(models.Keyword.term == keyword.term))
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Keyword already exists")
 
-    keyword = models.Keyword(value=payload.value, weight=payload.weight)
-    db.add(keyword)
+    db_keyword = models.Keyword(**keyword.model_dump())
+    db.add(db_keyword)
     db.commit()
-    db.refresh(keyword)
-    return keyword
+    db.refresh(db_keyword)
+    return db_keyword
 
 
-@app.get("/sources", response_model=list[schemas.SourceResponse])
+@app.get("/sources", response_model=list[SourceOut])
 def get_sources(db: Session = Depends(get_db)):
-    ensure_defaults(db)
-    return db.query(models.Source).order_by(models.Source.id.asc()).all()
+    return db.scalars(select(models.Source).order_by(models.Source.name)).all()
 
 
-@app.post("/sources", response_model=schemas.SourceResponse)
-def add_source(payload: schemas.SourceCreate, db: Session = Depends(get_db)):
-    exists = db.query(models.Source).filter(models.Source.name.ilike(payload.name)).first()
-    if exists:
-        raise HTTPException(status_code=400, detail="Source already exists")
+@app.post("/sources", response_model=SourceOut, status_code=status.HTTP_201_CREATED)
+def create_source(source: SourceCreate, db: Session = Depends(get_db)):
+    existing = db.scalar(select(models.Source).where(models.Source.name == source.name))
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Source already exists")
 
-    source = models.Source(name=payload.name, url=payload.url)
-    db.add(source)
+    db_source = models.Source(**source.model_dump())
+    db.add(db_source)
     db.commit()
-    db.refresh(source)
-    return source
+    db.refresh(db_source)
+    return db_source
 
 
-@app.post("/tenders/{tender_id}/mark-bid-review", response_model=schemas.TenderResponse)
+@app.post("/tenders/{tender_id}/mark-bid-review", response_model=TenderOut)
 def mark_bid_review(tender_id: int, db: Session = Depends(get_db)):
-    tender = db.query(models.Tender).filter(models.Tender.id == tender_id).first()
-    if not tender:
-        raise HTTPException(status_code=404, detail="Tender not found")
+    tender = db.get(models.Tender, tender_id)
+    if tender is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tender not found")
 
-    tender.status = "Review"
+    tender.status = "High Priority"
     tender.bid_recommendation = "Bid Review"
     db.commit()
     db.refresh(tender)
     return serialize_tender(tender)
 
 
-def serialize_tender(tender: models.Tender):
+def seed_defaults(db: Session):
+    for term, weight in DEFAULT_KEYWORD_WEIGHTS.items():
+        exists = db.scalar(select(models.Keyword).where(models.Keyword.term == term))
+        if exists is None:
+            db.add(models.Keyword(term=term, weight=weight))
+        else:
+            exists.weight = weight
+
+    default_sources = [
+        ("CPPP", "https://eprocure.gov.in/eprocure/app?page=FrontEndLatestActiveTendersOrgwise&service=page", "Public"),
+        ("ONGC eProcurement", "https://tenders.ongc.co.in/", "Public"),
+        ("Oil India National", "https://www.oil-india.com/tender-list/63", "Public"),
+        ("Oil India Global", "https://www.oil-india.com/tender-list/64", "Public"),
+        ("Oil India MSE", "https://www.oil-india.com/tender-list/265", "Public"),
+        ("GAIL Tenders", "https://gailtenders.in", "Public"),
+        ("IOCL Tenders", "https://iocletenders.gov.in", "Public"),
+        ("BPCL Tenders", "https://www.bharatpetroleum.in/Tenders/Tenders.aspx", "Public"),
+        ("HPCL Tenders", "https://www.hindustanpetroleum.com/tenders", "Public"),
+    ]
+    for name, url, source_type in default_sources:
+        exists = db.scalar(select(models.Source).where(models.Source.name == name))
+        if exists is None:
+            db.add(models.Source(name=name, url=url, source_type=source_type))
+        else:
+            exists.url = url
+            exists.source_type = source_type
+
+    db.commit()
+
+
+def tender_payload_for_db(tender_data: dict) -> dict:
     return {
-        "id": tender.id,
-        "company": tender.company,
-        "title": tender.title,
-        "tender_number": tender.tender_number,
-        "sector": tender.sector,
-        "location": tender.location,
-        "closing_date": tender.closing_date,
-        "source_portal": tender.source_portal,
-        "source_url": tender.source_url,
-        "matched_keywords": [k for k in tender.matched_keywords.split(",") if k],
-        "relevance_score": tender.relevance_score,
-        "status": tender.status,
-        "ai_summary": tender.ai_summary,
-        "bid_recommendation": tender.bid_recommendation,
-        "created_at": tender.created_at,
+        **tender_data,
+        "matched_keywords": json.dumps(tender_data["matched_keywords"]),
     }
+
+
+def serialize_tender(tender: models.Tender) -> dict:
+    data = tender.__dict__.copy()
+    data["matched_keywords"] = parse_keywords(tender.matched_keywords)
+    return data
+
+
+def parse_keywords(value: str | Sequence[str]) -> list[str]:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return parsed if isinstance(parsed, list) else []
