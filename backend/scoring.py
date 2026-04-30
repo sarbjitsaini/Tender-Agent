@@ -1,4 +1,6 @@
-POSITIVE_WEIGHTS = {
+from collections.abc import Iterable
+
+DEFAULT_KEYWORD_WEIGHTS = {
     "hot oil circulation": 60,
     "hot oiling": 60,
     "hoc": 50,
@@ -17,9 +19,6 @@ POSITIVE_WEIGHTS = {
     "ongc": 25,
     "oil india": 25,
     "gail": 20,
-}
-
-NEGATIVE_WEIGHTS = {
     "civil work": -40,
     "housekeeping": -40,
     "furniture": -30,
@@ -29,27 +28,41 @@ NEGATIVE_WEIGHTS = {
 }
 
 
-def score_tender(company: str, title: str, location: str) -> tuple[list[str], float]:
-    haystack = f"{company} {title} {location}".lower()
+def score_tender(text: str, keyword_weights: dict[str, float] | None = None) -> tuple[list[str], float, str, str]:
+    weights = keyword_weights or DEFAULT_KEYWORD_WEIGHTS
+    normalized_text = text.lower()
     matched = []
-    score = 0.0
+    raw_score = 0.0
 
-    for keyword, weight in POSITIVE_WEIGHTS.items():
-        if keyword in haystack:
+    for keyword, weight in weights.items():
+        if keyword.lower() in normalized_text:
             matched.append(keyword)
-            score += weight
+            raw_score += weight
 
-    for keyword, weight in NEGATIVE_WEIGHTS.items():
-        if keyword in haystack:
-            matched.append(keyword)
-            score += weight
-
-    return matched, max(0.0, min(100.0, score))
+    score = max(min(round(raw_score, 2), 100), 0)
+    status = classify_status(score)
+    recommendation = recommend_bid(status)
+    return matched, score, status, recommendation
 
 
-def priority_from_score(score: float) -> tuple[str, str]:
+def classify_status(score: float) -> str:
     if score >= 80:
-        return "High Priority", "Bid"
-    if 50 <= score <= 79:
-        return "Review", "Review"
-    return "Low Priority", "No-bid"
+        return "High Priority"
+    if score >= 50:
+        return "Review"
+    return "Low Priority"
+
+
+def recommend_bid(status: str) -> str:
+    if status == "High Priority":
+        return "Bid"
+    if status == "Review":
+        return "Review"
+    return "No Bid"
+
+
+def weights_from_keywords(keywords: Iterable[object]) -> dict[str, float]:
+    weights = {}
+    for keyword in keywords:
+        weights[keyword.term.lower()] = keyword.weight
+    return weights or DEFAULT_KEYWORD_WEIGHTS
